@@ -4874,10 +4874,12 @@ dependencies = [
  "futures",
  "hex",
  "jsonrpsee",
+ "lazy_static",
  "log",
  "madara-runtime",
  "mc-block-proposer",
  "mc-db",
+ "mc-deoxys",
  "mc-mapping-sync",
  "mc-rpc",
  "mc-storage",
@@ -4918,6 +4920,7 @@ dependencies = [
  "substrate-build-script-utils",
  "substrate-frame-rpc-system",
  "substrate-prometheus-endpoint",
+ "tokio",
  "try-runtime-cli",
 ]
 
@@ -5037,6 +5040,24 @@ dependencies = [
  "sp-core",
  "sp-database",
  "sp-runtime",
+]
+
+[[package]]
+name = "mc-deoxys"
+version = "0.1.0"
+dependencies = [
+ "blockifier",
+ "env_logger 0.9.3",
+ "log",
+ "mp-starknet",
+ "pathfinder",
+ "pathfinder-common",
+ "reqwest",
+ "serde_json",
+ "sp-core",
+ "starknet-gateway-client",
+ "starknet-gateway-types",
+ "tokio",
 ]
 
 [[package]]

@@ -25,6 +25,8 @@ clap = { workspace = true, features = ["derive"] }
 futures = { workspace = true, features = ["thread-pool"] }
 log = { workspace = true }
 serde = { workspace = true }
+lazy_static = { workspace = true }
+tokio = { workspace = true }
 
 frame-system = { workspace = true }
 sc-cli = { workspace = true }
@@ -89,6 +91,9 @@ starknet-core = { workspace = true }
 try-runtime-cli = { optional = true, git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.43" }
 
 serde_json = { workspace = true }
+
+#Deoxys
+mc-deoxys = { workspace = true }
 
 [build-dependencies]
 substrate-build-script-utils = { workspace = true }

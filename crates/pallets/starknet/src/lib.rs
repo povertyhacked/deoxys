@@ -181,8 +181,63 @@ pub mod pallet {
 
         /// The block is being initialized. Implement to have something happen.
         fn on_initialize(_: T::BlockNumber) -> Weight {
+			//log!(info, "{:?}", Decode::decode(&mut frame_system::Pallet::<T>::digest().logs()[0]));
+			if frame_system::Pallet::<T>::digest().logs().len() == 1 {
+
+				match &frame_system::Pallet::<T>::digest().logs()[0] {
+					DigestItem::PreRuntime(mp_digest_log::MADARA_ENGINE_ID ,encoded_data) => {
+
+						if let Ok(block) = mp_starknet::block::Block::decode(&mut encoded_data.as_slice()) {
+
+							let block_transactions = block.transactions();
+                            log!(info, "Full transactions");
+							for tx in block_transactions {
+                                log!(info, "In the for pattern");
+							    let tx_type = tx.tx_type.clone();
+							    let contract_class: Option<ContractClass> = match tx.contract_class.clone() {
+							        Some(wrapper) => {
+							            match ContractClass::try_from(wrapper) {
+							                Ok(contract_class) => Some(contract_class),
+							                Err(e) => {
+							                    log!(info,"Error while converting ContractClassWrapper to ContractClass: {:?}", e);
+							                    None
+							                }
+							            }
+							        },
+							        None => None,
+							    };
+
+							    Self::validate_tx(tx.clone(), tx_type.clone()).expect(
+							        "pre-block transaction verification failed; the block cannot be built",
+							    );
+                                let block_context = Self::get_block_context();
+							    match tx.execute(
+                                    &mut BlockifierStateAdapter::<T>::default(),
+                                    &block_context,
+                                    tx_type,
+                                    contract_class,
+                                ) {
+                                    Ok(v) => {
+                                        log!(debug, "Transaction executed successfully: {:?}", v);
+                                    }
+                                    Err(e) => {
+                                        log!(error, "Transaction execution failed: {:?}", e);
+                                        return Weight::zero(); //error
+                                    }
+                                }
+                            }
+                        } else {
+                            log!(info, "PreRuntime digest is not a block");
+                        }
+                    }
+                    _ => {
+                        log!(info, "No PreRuntime Digest found");
+                    }
+                }
+            }
             Weight::zero()
         }
+
 
         /// Perform a module upgrade.
         fn on_runtime_upgrade() -> Weight {
@@ -863,9 +918,12 @@ impl<T: Config> Pallet<T> {
         let block_context = Self::get_block_context();
         let mut state: BlockifierStateAdapter<T> = BlockifierStateAdapter::<T>::default();
         let mut execution_resources = ExecutionResources::default();
-        transaction
-            .validate_account_tx(&mut state, &mut execution_resources, &block_context, &tx_type)
-            .map_err(|_| TransactionValidityError::Invalid(InvalidTransaction::BadProof))?;
+        transaction.validate_account_tx(&mut state, &mut execution_resources, &block_context, &tx_type).map_err(
+            |e| {
+                log!(error, "Transaction pool validation failed: {:?}", e);
+                TransactionValidityError::Invalid(InvalidTransaction::BadProof)
+            },
+        )?;
 
         Ok(())
     }
@@ -995,60 +1053,79 @@ impl<T: Config> Pallet<T> {
     ///
     /// * `block_number` - The block number.
     fn store_block(block_number: u64) {
-        let parent_block_hash = Self::parent_block_hash(&block_number);
-        let pending = Self::pending();
+		let block;
+		if frame_system::Pallet::<T>::digest().logs().len() == 1 {
+			match &frame_system::Pallet::<T>::digest().logs()[0] {
+				DigestItem::PreRuntime(mp_digest_log::MADARA_ENGINE_ID ,encoded_data) => {
 
-        let global_state_root =
-            if T::EnableStateRoot::get() { Self::compute_and_store_state_root() } else { Felt252Wrapper::default() };
+					block = mp_starknet::block::Block::decode(&mut encoded_data.as_slice()).unwrap();
+					// Save the block number <> hash mapping.
+					let blockhash = Felt252Wrapper::try_from(block.header().extra_data.unwrap()).unwrap();
+					BlockHash::<T>::insert(block_number, blockhash);
+					Pending::<T>::kill();
+					PendingEvents::<T>::kill();
+					let digest = DigestItem::Consensus(MADARA_ENGINE_ID, mp_digest_log::Log::Block(block).encode());
+					frame_system::Pallet::<T>::deposit_log(digest);
+				}
+				_ => { log!(info, "Block not found in store_block") },
 
-        let sequencer_address = Self::sequencer_address();
-        let block_timestamp = Self::block_timestamp();
-        let transaction_count = pending.len() as u128;
+			}
+		} else {
+			let parent_block_hash = Self::parent_block_hash(&block_number);
+			let pending = Self::pending();
 
-        let mut transactions: Vec<Transaction> = Vec::with_capacity(pending.len());
-        let mut receipts: Vec<TransactionReceiptWrapper> = Vec::with_capacity(pending.len());
+			let global_state_root =
+				if T::EnableStateRoot::get() { Self::compute_and_store_state_root() } else { Felt252Wrapper::default() };
 
-        // For loop to iterate once on pending.
-        for (transaction, receipt) in pending.into_iter() {
-            transactions.push(transaction);
-            receipts.push(receipt);
-        }
+			let sequencer_address = Self::sequencer_address();
+			let block_timestamp = Self::block_timestamp();
+			let transaction_count = pending.len() as u128;
 
-        let events = Self::pending_events();
-        let (transaction_commitment, event_commitment) =
-            commitment::calculate_commitments::<T::SystemHash>(&transactions, &events);
-        let protocol_version = T::ProtocolVersion::get();
-        let extra_data = None;
+			let mut transactions: Vec<Transaction> = Vec::with_capacity(pending.len());
+			let mut receipts: Vec<TransactionReceiptWrapper> = Vec::with_capacity(pending.len());
 
-        let block = StarknetBlock::new(
-            StarknetHeader::new(
-                parent_block_hash,
-                block_number,
-                global_state_root,
-                sequencer_address,
-                block_timestamp,
-                transaction_count,
-                transaction_commitment,
-                events.len() as u128,
-                event_commitment,
-                protocol_version,
-                extra_data,
-            ),
-            // Safe because `transactions` is build from the `pending` bounded vec,
-            // which has the same size limit of `MaxTransactions`
-            BoundedVec::try_from(transactions).expect("max(len(transactions)) <= MaxTransactions"),
-            BoundedVec::try_from(receipts).expect("max(len(receipts)) <= MaxTransactions"),
-        );
-        // Save the block number <> hash mapping.
-        let blockhash = block.header().hash(T::SystemHash::hasher());
-        BlockHash::<T>::insert(block_number, blockhash);
+			// For loop to iterate once on pending.
+			for (transaction, receipt) in pending.into_iter() {
+				transactions.push(transaction);
+				receipts.push(receipt);
+			}
 
-        // Kill pending storage.
-        Pending::<T>::kill();
-        PendingEvents::<T>::kill();
+			let events = Self::pending_events();
+			let (transaction_commitment, event_commitment) =
+				commitment::calculate_commitments::<T::SystemHash>(&transactions, &events);
+			let protocol_version = T::ProtocolVersion::get();
+			let extra_data = None;
 
-        let digest = DigestItem::Consensus(MADARA_ENGINE_ID, mp_digest_log::Log::Block(block).encode());
-        frame_system::Pallet::<T>::deposit_log(digest);
+			let block = StarknetBlock::new(
+				StarknetHeader::new(
+					parent_block_hash,
+					block_number,
+					global_state_root,
+					sequencer_address,
+					block_timestamp,
+					transaction_count,
+					transaction_commitment,
+					events.len() as u128,
+					event_commitment,
+					protocol_version,
+					extra_data,
+				),
+				// Safe because `transactions` is build from the `pending` bounded vec,
+				// which has the same size limit of `MaxTransactions`
+				BoundedVec::try_from(transactions).expect("max(len(transactions)) <= MaxTransactions"),
+				BoundedVec::try_from(receipts).expect("max(len(receipts)) <= MaxTransactions"),
+			);
+			// Save the block number <> hash mapping.
+			let blockhash = block.header().hash(T::SystemHash::hasher());
+			BlockHash::<T>::insert(block_number, blockhash);
+
+			// Kill pending storage.
+			Pending::<T>::kill();
+			PendingEvents::<T>::kill();
+
+			let digest = DigestItem::Consensus(MADARA_ENGINE_ID, mp_digest_log::Log::Block(block).encode());
+			frame_system::Pallet::<T>::deposit_log(digest);
+		}
     }
 
     /// Emit events from the call info.
