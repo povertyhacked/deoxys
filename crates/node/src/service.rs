@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use futures::channel::mpsc;
 use futures::future;
@@ -19,11 +20,13 @@ use mp_starknet::sequencer_address::{
 };
 use pallet_starknet::runtime_api::StarknetRuntimeApi;
 use prometheus_endpoint::Registry;
+use sc_client_api::AuxStore;
 use sc_client_api::{Backend, BlockBackend, BlockchainEvents, HeaderBackend};
 use sc_consensus::{BasicQueue, block_import::BlockImportParams};
 use sc_consensus_manual_seal::{ConsensusDataProvider, Error};
 use sc_consensus_aura::{SlotProportion, StartAuraParams};
 use sc_consensus_grandpa::{GrandpaBlockImport, SharedVoterState};
+use sc_consensus_manual_seal::consensus::aura::AuraConsensusDataProvider;
 pub use sc_executor::NativeElseWasmExecutor;
 use sc_service::error::Error as ServiceError;
 use sc_service::{new_db_backend, Configuration, TaskManager, WarpSyncParams};
@@ -32,6 +35,10 @@ use sp_api::offchain::OffchainStorage;
 use sp_api::{ConstructRuntimeApi, ProvideRuntimeApi, TransactionFor};
 use sp_consensus_aura::sr25519::AuthorityPair as AuraPair;
 use sp_offchain::STORAGE_PREFIX;
+use sp_blockchain::HeaderMetadata;
+use sp_consensus_aura::ed25519::AuthorityId;
+use sp_consensus_aura::AuraApi;
+use sc_client_api::UsageProvider;
 use sp_core::Encode;
 use sp_runtime::{traits::{BlakeTwo256, Block as BlockT}, generic::{Digest, DigestItem}};
 use sp_trie::PrefixedMemoryDB;
@@ -523,7 +530,9 @@ fn run_manual_seal_authorship(
 where
     RuntimeApi: ConstructRuntimeApi<Block, FullClient>,
     RuntimeApi: Send + Sync + 'static,
-{
+    FullClient: ProvideRuntimeApi<Block> + AuxStore + HeaderBackend<Block> + HeaderMetadata<Block, Error = sp_blockchain::Error> + UsageProvider<Block> + 'static,
+    <FullClient as ProvideRuntimeApi<Block>>::Api: AuraApi<Block, sp_consensus_aura::sr25519::AuthorityId>,
+    {
     let proposer_factory = ProposerFactory::new(
         task_manager.spawn_handle(),
         client.clone(),
@@ -535,18 +544,16 @@ where
 
     /// Provide a mock duration starting at 0 in millisecond for timestamp inherent.
     /// Each call will increment timestamp by slot_duration making Aura think time has passed.
-    struct MockTimestampInherentDataProvider;
+    struct RealTimestampInherentDataProvider;
 
     #[async_trait::async_trait]
-    impl sp_inherents::InherentDataProvider for MockTimestampInherentDataProvider {
+    impl sp_inherents::InherentDataProvider for RealTimestampInherentDataProvider {
         async fn provide_inherent_data(
             &self,
             inherent_data: &mut sp_inherents::InherentData,
         ) -> Result<(), sp_inherents::Error> {
-            TIMESTAMP.with(|x| {
-                *x.borrow_mut() += madara_runtime::SLOT_DURATION;
-                inherent_data.put_data(sp_timestamp::INHERENT_IDENTIFIER, &*x.borrow())
-            })
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+            inherent_data.put_data(sp_timestamp::INHERENT_IDENTIFIER, &now)
         }
 
         async fn try_handle_error(
@@ -560,40 +567,11 @@ where
     }
 
     let create_inherent_data_providers = move |_, ()| async move {
-        let timestamp = MockTimestampInherentDataProvider;
+        let timestamp = RealTimestampInherentDataProvider;
         Ok(timestamp)
     };
 
-	struct QueryBlockConsensusDataProvider<C> {
-		_client: Arc<C>,
-	}
-
-	impl<B, C> ConsensusDataProvider<B> for QueryBlockConsensusDataProvider<C>
-		where
-		B: BlockT,
-		C: ProvideRuntimeApi<B> + Send + Sync,{
-		type Transaction = TransactionFor<C, B>;
-		type Proof = ();
-
-		fn create_digest(&self, _parent: &B::Header, _inherents: &InherentData) -> Result<Digest, Error> {
-            let mut queue_guard = QUEUE.lock().unwrap();
-            let starknet_block = queue_guard.pop_front().unwrap_or_else(StarknetBlock::default);
-            println!("Synced block {:?}", starknet_block.header().block_number);
-            let block_digest_item: DigestItem = sp_runtime::DigestItem::PreRuntime(mp_digest_log::MADARA_ENGINE_ID, Encode::encode(&starknet_block));
-            Ok(Digest { logs: vec![block_digest_item] })
-        }
-
-		fn append_block_import(
-			&self,
-			_parent: &B::Header,
-			params: &mut BlockImportParams<B, Self::Transaction>,
-			_inherents: &InherentData,
-			_proof: Self::Proof,
-		) -> Result<(), Error> {
-			params.post_digests.push(DigestItem::Other(vec![1]));
-			Ok(())
-		}
-	}
+    let aura_consensus_data_provider = AuraConsensusDataProvider::new(client.clone());
 
     let manual_seal = match sealing {
         Sealing::Manual => future::Either::Left(sc_consensus_manual_seal::run_manual_seal(
@@ -604,7 +582,7 @@ where
                 pool: transaction_pool,
                 commands_stream,
                 select_chain,
-                consensus_data_provider: Some(Box::new(QueryBlockConsensusDataProvider { _client: client})),
+                consensus_data_provider: Some(Box::new(aura_consensus_data_provider)),
                 create_inherent_data_providers,
             },
         )),
@@ -621,7 +599,6 @@ where
         )),
     };
 
-    // we spawn the future on a background thread managed by service.
     task_manager.spawn_essential_handle().spawn_blocking("manual-seal", None, manual_seal);
     Ok(())
 }
