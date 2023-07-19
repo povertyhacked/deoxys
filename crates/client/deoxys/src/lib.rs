@@ -209,6 +209,7 @@ pub async fn fetch_block(queue: BlockQueue) {
                         if status.is_success() {
                             info!("[👽] Block #{} synced correctly", i);
                             i += 1;
+                            time::sleep(time::Duration::from_secs(10)).await;
                         }
                     },
                     Err(e) => {
