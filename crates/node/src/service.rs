@@ -3,10 +3,13 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
+use std::marker::PhantomData;
+use std::time::SystemTime;
 
 use futures::channel::mpsc;
 use futures::future;
 use futures::prelude::*;
+use madara_runtime::SLOT_DURATION;
 use madara_runtime::opaque::Block;
 use madara_runtime::{self, Hash, RuntimeApi};
 use mc_block_proposer::ProposerFactory;
@@ -19,10 +22,10 @@ use mp_starknet::sequencer_address::{
 };
 use pallet_starknet::runtime_api::StarknetRuntimeApi;
 use prometheus_endpoint::Registry;
-use sc_client_api::{Backend, BlockBackend, BlockchainEvents, HeaderBackend};
+use sc_client_api::{Backend, BlockBackend, BlockchainEvents, HeaderBackend, AuxStore, UsageProvider};
 use sc_consensus::{BasicQueue, block_import::BlockImportParams};
 use sc_consensus_manual_seal::{ConsensusDataProvider, Error};
-use sc_consensus_aura::{SlotProportion, StartAuraParams};
+use sc_consensus_aura::{SlotProportion, StartAuraParams, slot_duration};
 use sc_consensus_grandpa::{GrandpaBlockImport, SharedVoterState};
 pub use sc_executor::NativeElseWasmExecutor;
 use sc_service::error::Error as ServiceError;
@@ -30,12 +33,18 @@ use sc_service::{new_db_backend, Configuration, TaskManager, WarpSyncParams};
 use sc_telemetry::{Telemetry, TelemetryHandle, TelemetryWorker};
 use sp_api::offchain::OffchainStorage;
 use sp_api::{ConstructRuntimeApi, ProvideRuntimeApi, TransactionFor};
-use sp_consensus_aura::sr25519::AuthorityPair as AuraPair;
+use sp_blockchain::HeaderMetadata;
+use sp_consensus_aura::{
+	digests::CompatibleDigestItem,
+	sr25519::{AuthorityId, AuthoritySignature, AuthorityPair as AuraPair},
+	AuraApi, Slot, SlotDuration,
+};
 use sp_offchain::STORAGE_PREFIX;
 use sp_core::Encode;
 use sp_runtime::{traits::{BlakeTwo256, Block as BlockT}, generic::{Digest, DigestItem}};
 use sp_trie::PrefixedMemoryDB;
 use sp_inherents::InherentData;
+use sp_timestamp::TimestampInherentData;
 
 use lazy_static::lazy_static;
 // Deoxys
@@ -535,18 +544,16 @@ where
 
     /// Provide a mock duration starting at 0 in millisecond for timestamp inherent.
     /// Each call will increment timestamp by slot_duration making Aura think time has passed.
-    struct MockTimestampInherentDataProvider;
+    struct RealTimestampInherentDataProvider;
 
     #[async_trait::async_trait]
-    impl sp_inherents::InherentDataProvider for MockTimestampInherentDataProvider {
+    impl sp_inherents::InherentDataProvider for RealTimestampInherentDataProvider {
         async fn provide_inherent_data(
             &self,
             inherent_data: &mut sp_inherents::InherentData,
         ) -> Result<(), sp_inherents::Error> {
-            TIMESTAMP.with(|x| {
-                *x.borrow_mut() += madara_runtime::SLOT_DURATION;
-                inherent_data.put_data(sp_timestamp::INHERENT_IDENTIFIER, &*x.borrow())
-            })
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+            inherent_data.put_data(sp_timestamp::INHERENT_IDENTIFIER, &now)
         }
 
         async fn try_handle_error(
@@ -560,27 +567,57 @@ where
     }
 
     let create_inherent_data_providers = move |_, ()| async move {
-        let timestamp = MockTimestampInherentDataProvider;
+        let timestamp = RealTimestampInherentDataProvider;
         Ok(timestamp)
     };
 
-	struct QueryBlockConsensusDataProvider<C> {
+	struct AuraQueryBlockConsensusDataProvider<B, C, P> {
 		_client: Arc<C>,
+        // slot duration
+        slot_duration: SlotDuration,
+        // phantom data for required generics
+        _phantom: PhantomData<(B, C, P)>,
 	}
 
-	impl<B, C> ConsensusDataProvider<B> for QueryBlockConsensusDataProvider<C>
+    impl<B, C, P> AuraQueryBlockConsensusDataProvider<B, C, P>
+    where
+        B: BlockT,
+        C: AuxStore + ProvideRuntimeApi<B> + UsageProvider<B>,
+        C::Api: AuraApi<B, AuthorityId>,
+    {
+        /// Creates a new instance of the [`AuraConsensusDataProvider`], requires that `client`
+        /// implements [`sp_consensus_aura::AuraApi`]
+        pub fn new(client: Arc<C>) -> Self {
+            let slot_duration = sc_consensus_aura::slot_duration(&*client)
+                .expect("slot_duration is always present; qed.");
+
+            Self { _client: client , slot_duration, _phantom: PhantomData }
+        }
+    }
+
+	impl<B, C, P> ConsensusDataProvider<B> for AuraQueryBlockConsensusDataProvider<B, C, P>
 		where
 		B: BlockT,
-		C: ProvideRuntimeApi<B> + Send + Sync,{
+		C: AuxStore
+		+ HeaderBackend<B>
+		+ HeaderMetadata<B, Error = sp_blockchain::Error>
+		+ UsageProvider<B>
+		+ ProvideRuntimeApi<B>,
+	C::Api: AuraApi<B, AuthorityId>,
+	P: Send + Sync,{
 		type Transaction = TransactionFor<C, B>;
-		type Proof = ();
+		type Proof = P;
 
 		fn create_digest(&self, _parent: &B::Header, _inherents: &InherentData) -> Result<Digest, Error> {
             let mut queue_guard = QUEUE.lock().unwrap();
             let starknet_block = queue_guard.pop_front().unwrap_or_else(StarknetBlock::default);
-            println!("Synced block {:?}", starknet_block.header().block_number);
             let block_digest_item: DigestItem = sp_runtime::DigestItem::PreRuntime(mp_digest_log::MADARA_ENGINE_ID, Encode::encode(&starknet_block));
-            Ok(Digest { logs: vec![block_digest_item] })
+
+            let timestamp = _inherents.timestamp_inherent_data()?.expect("Timestamp is always present; qed");
+            let digest_item = <DigestItem as CompatibleDigestItem<AuthoritySignature>>::aura_pre_digest(
+                Slot::from_timestamp(timestamp, self.slot_duration),
+            );
+            Ok(Digest { logs: vec![block_digest_item, digest_item] })
         }
 
 		fn append_block_import(
@@ -604,7 +641,11 @@ where
                 pool: transaction_pool,
                 commands_stream,
                 select_chain,
-                consensus_data_provider: Some(Box::new(QueryBlockConsensusDataProvider { _client: client})),
+                consensus_data_provider: Some(
+					Box::new(
+						AuraQueryBlockConsensusDataProvider::new(client)
+					)
+				),
                 create_inherent_data_providers,
             },
         )),
