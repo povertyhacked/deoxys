@@ -544,6 +544,7 @@ where
 
     /// Provide a mock duration starting at 0 in millisecond for timestamp inherent.
     /// Each call will increment timestamp by slot_duration making Aura think time has passed.
+    
     struct RealTimestampInherentDataProvider;
 
     #[async_trait::async_trait]
@@ -552,8 +553,10 @@ where
             &self,
             inherent_data: &mut sp_inherents::InherentData,
         ) -> Result<(), sp_inherents::Error> {
-            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-            inherent_data.put_data(sp_timestamp::INHERENT_IDENTIFIER, &now)
+            TIMESTAMP.with(|x| {
+                *x.borrow_mut() += madara_runtime::SLOT_DURATION;
+                inherent_data.put_data(sp_timestamp::INHERENT_IDENTIFIER, &*x.borrow())
+            })
         }
 
         async fn try_handle_error(
@@ -561,7 +564,6 @@ where
             _identifier: &sp_inherents::InherentIdentifier,
             _error: &[u8],
         ) -> Option<Result<(), sp_inherents::Error>> {
-            // The pallet never reports error.
             None
         }
     }
