@@ -1060,6 +1060,7 @@ impl<T: Config> Pallet<T> {
 					PendingEvents::<T>::kill();
 					let digest = DigestItem::Consensus(MADARA_ENGINE_ID, mp_digest_log::Log::Block(block).encode());
 					frame_system::Pallet::<T>::deposit_log(digest);
+					frame_system::Pallet::<T>::digest().pop();
 				}
 				_ => { log!(info, "Block not found in store_block") },
 
