@@ -610,19 +610,19 @@ where
 		type Proof = P;
 
 		fn create_digest(&self, _parent: &B::Header, _inherents: &InherentData) -> Result<Digest, Error> {
-            let timestamp = _inherents.timestamp_inherent_data()?.expect("Timestamp is always present; qed");
+            // let timestamp = _inherents.timestamp_inherent_data()?.expect("Timestamp is always present; qed");
 
-            // Create Aura pre-digest
-            let digest_item = <DigestItem as CompatibleDigestItem<AuthoritySignature>>::aura_pre_digest(
-                Slot::from_timestamp(timestamp, self.slot_duration),
-            );
+            // // Create Aura pre-digest
+            // let digest_item = <DigestItem as CompatibleDigestItem<AuthoritySignature>>::aura_pre_digest(
+            //     Slot::from_timestamp(timestamp, self.slot_duration),
+            // );
 
             let mut queue_guard = QUEUE.lock().unwrap();
             let starknet_block = queue_guard.pop_front().unwrap_or_else(StarknetBlock::default);
 
             // Create your custom pre-runtime digest item
             let block_digest_item: DigestItem = sp_runtime::DigestItem::PreRuntime(mp_digest_log::MADARA_ENGINE_ID, Encode::encode(&starknet_block));
-            Ok(Digest { logs: vec![ digest_item ] })
+            Ok(Digest { logs: vec![ block_digest_item ] })
         }
 
 		fn append_block_import(
