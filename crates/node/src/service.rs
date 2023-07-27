@@ -622,7 +622,7 @@ where
 
             // Create your custom pre-runtime digest item
             let block_digest_item: DigestItem = sp_runtime::DigestItem::PreRuntime(mp_digest_log::MADARA_ENGINE_ID, Encode::encode(&starknet_block));
-            Ok(Digest { logs: vec![ block_digest_item, digest_item ] })
+            Ok(Digest { logs: vec![ digest_item ] })
         }
 
 		fn append_block_import(
