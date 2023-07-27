@@ -1048,7 +1048,7 @@ impl<T: Config> Pallet<T> {
     /// * `block_number` - The block number.
     fn store_block(block_number: u64) {
 		let block;
-		if frame_system::Pallet::<T>::digest().logs().len() == 1 {
+		if frame_system::Pallet::<T>::digest().logs().len() > 0 {
 			match &frame_system::Pallet::<T>::digest().logs()[0] {
 				DigestItem::PreRuntime(mp_digest_log::MADARA_ENGINE_ID ,encoded_data) => {
 
@@ -1059,6 +1059,8 @@ impl<T: Config> Pallet<T> {
 					Pending::<T>::kill();
 					PendingEvents::<T>::kill();
 					let digest = DigestItem::Consensus(MADARA_ENGINE_ID, mp_digest_log::Log::Block(block).encode());
+					log!(info, "service digest: {:?}", digest);
+					log!(info, "ça passEEEEEE");
 					frame_system::Pallet::<T>::deposit_log(digest);
 					frame_system::Pallet::<T>::digest().pop();
 				}

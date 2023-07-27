@@ -27,7 +27,6 @@ use sc_consensus::{BasicQueue, block_import::BlockImportParams};
 use sc_consensus_manual_seal::{ConsensusDataProvider, Error};
 use sc_consensus_aura::{SlotProportion, StartAuraParams, slot_duration};
 use sc_consensus_grandpa::{GrandpaBlockImport, SharedVoterState};
-use sc_consensus_manual_seal::consensus::aura::AuraConsensusDataProvider;
 pub use sc_executor::NativeElseWasmExecutor;
 use sc_service::error::Error as ServiceError;
 use sc_service::{new_db_backend, Configuration, TaskManager, WarpSyncParams};
@@ -623,10 +622,8 @@ where
 
             // Create your custom pre-runtime digest item
             let block_digest_item: DigestItem = sp_runtime::DigestItem::PreRuntime(mp_digest_log::MADARA_ENGINE_ID, Encode::encode(&starknet_block));
-
-            Ok(Digest { logs: vec![digest_item, block_digest_item] })
+            Ok(Digest { logs: vec![ block_digest_item, digest_item ] })
         }
-
 
 		fn append_block_import(
 			&self,
@@ -635,6 +632,7 @@ where
 			_inherents: &InherentData,
 			_proof: Self::Proof,
 		) -> Result<(), Error> {
+            _parent.digest_mut().push(CompatibleDigestItem::aura_seal(mp_digest_log::MADARA_ENGINE_ID););
 			Ok(())
 		}
 	}

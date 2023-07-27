@@ -25,7 +25,7 @@ use scale_codec::{Decode, Encode};
 use sp_runtime::generic::{Digest, OpaqueDigestItemId};
 use sp_runtime::ConsensusEngineId;
 
-pub const MADARA_ENGINE_ID: ConsensusEngineId = [b'a', b'u', b'r', b'a'];
+pub const MADARA_ENGINE_ID: ConsensusEngineId = [b'z', b'u', b'r', b'a'];
 
 /// A Madara log
 ///
