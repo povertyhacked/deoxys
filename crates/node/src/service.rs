@@ -632,7 +632,11 @@ where
 			_inherents: &InherentData,
 			_proof: Self::Proof,
 		) -> Result<(), Error> {
-            _parent.digest_mut().push(CompatibleDigestItem::aura_seal(mp_digest_log::MADARA_ENGINE_ID););
+            let vec_signature: [u8; 64] = array_bytes::hex2array_unchecked(
+				"5a9755f069939f45d96aaf125cf5ce7ba1db998686f87f2fb3cbdea922078741a73891ba265f70c31436e18a9acd14d189d73c12317ab6c313285cd938453202"
+			);
+			let seal = sp_runtime::DigestItem::Seal(mp_digest_log::MADARA_ENGINE_ID, vec_signature.to_vec());
+			params.post_digests.push(seal);
 			Ok(())
 		}
 	}

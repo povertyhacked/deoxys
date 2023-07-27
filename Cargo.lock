@@ -6194,6 +6194,7 @@ dependencies = [
 name = "madara"
 version = "0.1.0-alpha"
 dependencies = [
+ "array-bytes 6.1.0",
  "async-trait",
  "blockifier",
  "clap",

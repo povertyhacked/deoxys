@@ -94,6 +94,7 @@ serde_json = { workspace = true }
 
 #Deoxys
 mc-deoxys = { workspace = true }
+array-bytes = "6.1.0"
 
 [build-dependencies]
 substrate-build-script-utils = { workspace = true }
@@ -101,11 +102,7 @@ substrate-build-script-utils = { workspace = true }
 [features]
 default = []
 # Dependencies that are only required if runtime benchmarking should be build.
-runtime-benchmarks = [
-  "madara-runtime/runtime-benchmarks",
-  "frame-benchmarking/runtime-benchmarks",
-  "frame-benchmarking-cli/runtime-benchmarks",
-]
+runtime-benchmarks = ["madara-runtime/runtime-benchmarks", "frame-benchmarking/runtime-benchmarks", "frame-benchmarking-cli/runtime-benchmarks"]
 # Enable features that allow the runtime to be tried and debugged. Name might be subject to change
 # in the near future.
 try-runtime = ["madara-runtime/try-runtime", "try-runtime-cli/try-runtime"]
