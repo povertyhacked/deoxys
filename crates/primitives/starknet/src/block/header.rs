@@ -3,7 +3,6 @@ use sp_core::U256;
 use starknet_api::api_core::{ChainId, ContractAddress};
 use starknet_api::block::{BlockNumber, BlockTimestamp};
 use starknet_api::hash::StarkFelt;
-use starknet_api::stdlib::collections::HashMap;
 
 use crate::execution::types::{ContractAddressWrapper, Felt252Wrapper};
 use crate::traits::hash::HasherT;
@@ -91,32 +90,53 @@ impl Header {
             block_number: BlockNumber(self.block_number),
             block_timestamp: BlockTimestamp(self.block_timestamp),
             sequencer_address,
-            vm_resource_fee_cost: HashMap::default(),
+            vm_resource_fee_cost: Default::default(),
             fee_token_address,
             invoke_tx_max_n_steps: 1000000,
             validate_max_n_steps: 1000000,
             // FIXME: https://github.com/keep-starknet-strange/madara/issues/329
             gas_price: 10,
+            max_recursion_depth: 50,
         }
     }
 
     /// Compute the hash of the header.
     #[must_use]
     pub fn hash<H: HasherT>(&self, hasher: H) -> Felt252Wrapper {
-        let data: &[Felt252Wrapper] = &[
-            self.block_number.into(), // TODO: remove unwrap
-            self.global_state_root,
-            self.sequencer_address,
-            self.block_timestamp.into(),
-            self.transaction_count.into(),
-            self.transaction_commitment,
-            self.event_count.into(),
-            self.event_commitment,
-            self.protocol_version.into(),
-            Felt252Wrapper::ZERO,
-            self.parent_block_hash,
-        ];
+		let first_07_block = 833;
+		if self.block_number >= first_07_block {
+			let data: &[Felt252Wrapper] = &[
+				self.block_number.into(),
+				self.global_state_root,
+				self.sequencer_address,
+				self.block_timestamp.into(),
+				self.transaction_count.into(),
+				self.transaction_commitment,
+				self.event_count.into(),
+				self.event_commitment,
+				self.protocol_version.into(),
+				Felt252Wrapper::ZERO,
+				self.parent_block_hash,
+			];
 
-        <H as HasherT>::compute_hash_on_wrappers(&hasher, data)
+        	<H as HasherT>::compute_hash_on_wrappers(&hasher, data)
+		} else {
+			let data: &[Felt252Wrapper] = &[
+				self.block_number.into(),
+				self.global_state_root,
+				Felt252Wrapper::ZERO,
+				Felt252Wrapper::ZERO,
+				self.transaction_count.into(),
+				self.transaction_commitment,
+				Felt252Wrapper::ZERO,
+				Felt252Wrapper::ZERO,
+				Felt252Wrapper::ZERO,
+				Felt252Wrapper::ZERO,
+				Felt252Wrapper::from_hex_be("0x534e5f4d41494e").unwrap(),
+				self.parent_block_hash,
+			];
+
+			<H as HasherT>::compute_hash_on_wrappers(&hasher, data)
+		}
     }
 }
