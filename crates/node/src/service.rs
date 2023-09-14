@@ -1,6 +1,7 @@
 //! Service and ServiceFactory implementation. Specialized wrapper over substrate service.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,23 +11,23 @@ use futures::prelude::*;
 use madara_runtime::opaque::Block;
 use madara_runtime::{self, Hash, RuntimeApi};
 use mc_block_proposer::ProposerFactory;
+use mc_data_availability::avail::config::AvailConfig;
+use mc_data_availability::avail::AvailClient;
+use mc_data_availability::celestia::config::CelestiaConfig;
+use mc_data_availability::celestia::CelestiaClient;
+use mc_data_availability::ethereum::config::EthereumConfig;
+use mc_data_availability::ethereum::EthereumClient;
+use mc_data_availability::{DaClient, DaLayer, DataAvailabilityWorker};
 use mc_mapping_sync::MappingSyncWorker;
 use mc_storage::overrides_handle;
 use mc_transaction_pool::FullPool;
-use mp_starknet::block::{Block as StarknetBlock };
 use mp_starknet::sequencer_address::{
     InherentDataProvider as SeqAddrInherentDataProvider, DEFAULT_SEQUENCER_ADDRESS, SEQ_ADDR_STORAGE_KEY,
 };
-use starknet_api::block::{BlockHash, BlockNumber, GasPrice, BlockStatus, BlockTimestamp};
-use starknet_api::core::{ContractAddress, GlobalRoot};
-use starknet_api::hash::StarkHash;
-use starknet_api::serde_utils::{BytesAsHex, PrefixedBytesAsHex};
-use starknet_api::transaction::{Transaction, TransactionHash, TransactionOutput, TransactionReceipt};
 use pallet_starknet::runtime_api::StarknetRuntimeApi;
 use prometheus_endpoint::Registry;
 use sc_client_api::{Backend, BlockBackend, BlockchainEvents, HeaderBackend};
-use sc_consensus::{BasicQueue, block_import::BlockImportParams};
-use sc_consensus_manual_seal::{ConsensusDataProvider, Error};
+use sc_consensus::BasicQueue;
 use sc_consensus_aura::{SlotProportion, StartAuraParams};
 use sc_consensus_grandpa::{GrandpaBlockImport, SharedVoterState};
 pub use sc_executor::NativeElseWasmExecutor;
@@ -37,16 +38,8 @@ use sp_api::offchain::OffchainStorage;
 use sp_api::{ConstructRuntimeApi, ProvideRuntimeApi, TransactionFor};
 use sp_consensus_aura::sr25519::AuthorityPair as AuraPair;
 use sp_offchain::STORAGE_PREFIX;
-use sp_core::Encode;
-use sp_runtime::{traits::{BlakeTwo256, Block as BlockT}, generic::{Digest, DigestItem}};
+use sp_runtime::traits::BlakeTwo256;
 use sp_trie::PrefixedMemoryDB;
-use sp_inherents::InherentData;
-
-use lazy_static::lazy_static;
-// Deoxys
-use mc_deoxys::{fetch_block, BlockQueue, create_block_queue};
-use starknet_core::serde;
-use tokio::time::sleep;
 
 use crate::cli::Sealing;
 use crate::genesis_block::MadaraGenesisBlockBuilder;
@@ -54,14 +47,6 @@ use crate::rpc::StarknetDeps;
 use crate::starknet::{db_config_dir, MadaraBackend};
 // Our native executor instance.
 pub struct ExecutorDispatch;
-
-use mockito::mock;
-use std::env;
-use std::fs::read_to_string;
-use std::path::Path;
-use std::string::String;
-use std::io;
-const BLOCK_NUMBER_QUERY: &str = "blockNumber";
 
 impl sc_executor::NativeExecutionDispatch for ExecutorDispatch {
     /// Only enable the benchmarking host functions when we actually want to benchmark.
@@ -266,12 +251,12 @@ where
     ))
 }
 
-lazy_static! {
-    static ref QUEUE: BlockQueue = create_block_queue();
-}
-
 /// Builds a new service for a full client.
-pub async fn new_full(config: Configuration, sealing: Option<Sealing>, rpc_port: u16) -> Result<TaskManager, ServiceError> {
+pub fn new_full(
+    config: Configuration,
+    sealing: Option<Sealing>,
+    da_layer: Option<(DaLayer, PathBuf)>,
+) -> Result<TaskManager, ServiceError> {
     let build_import_queue =
         if sealing.is_some() { build_manual_seal_import_queue } else { build_aura_grandpa_import_queue };
 
@@ -388,13 +373,42 @@ pub async fn new_full(config: Configuration, sealing: Option<Sealing>, rpc_port:
             Duration::new(6, 0),
             client.clone(),
             backend.clone(),
-            madara_backend,
+            madara_backend.clone(),
             3,
             0,
             hasher,
         )
         .for_each(|()| future::ready(())),
     );
+
+    // initialize data availability worker
+    if let Some((da_layer, da_path)) = da_layer {
+        let da_client: Box<dyn DaClient + Send + Sync> = match da_layer {
+            DaLayer::Celestia => {
+                let celestia_conf = CelestiaConfig::try_from(&da_path)?;
+                Box::new(CelestiaClient::try_from(celestia_conf).map_err(|e| ServiceError::Other(e.to_string()))?)
+            }
+            DaLayer::Ethereum => {
+                let ethereum_conf = EthereumConfig::try_from(&da_path)?;
+                Box::new(EthereumClient::try_from(ethereum_conf)?)
+            }
+            DaLayer::Avail => {
+                let avail_conf = AvailConfig::try_from(&da_path)?;
+                Box::new(AvailClient::try_from(avail_conf).map_err(|e| ServiceError::Other(e.to_string()))?)
+            }
+        };
+
+        task_manager.spawn_essential_handle().spawn(
+            "da-worker-prove",
+            Some("madara"),
+            DataAvailabilityWorker::prove_current_block(da_client.get_mode(), client.clone(), madara_backend.clone()),
+        );
+        task_manager.spawn_essential_handle().spawn(
+            "da-worker-update",
+            Some("madara"),
+            DataAvailabilityWorker::update_state(da_client, client.clone(), madara_backend),
+        );
+    };
 
     if role.is_authority() {
         // manual-seal authorship
@@ -411,10 +425,6 @@ pub async fn new_full(config: Configuration, sealing: Option<Sealing>, rpc_port:
             )?;
 
             network_starter.start_network();
-
-            tokio::spawn(async move {
-                fetch_block(QUEUE.clone(), rpc_port).await;
-            });
 
             log::info!("Manual Seal Ready");
             return Ok(task_manager);
@@ -579,50 +589,16 @@ where
         Ok(timestamp)
     };
 
-	struct QueryBlockConsensusDataProvider<C> {
-		_client: Arc<C>,
-	}
-
-	impl<B, C> ConsensusDataProvider<B> for QueryBlockConsensusDataProvider<C>
-		where
-		B: BlockT,
-		C: ProvideRuntimeApi<B> + Send + Sync,{
-		type Transaction = TransactionFor<C, B>;
-		type Proof = ();
-
-		fn create_digest(&self, _parent: &B::Header, _inherents: &InherentData) -> Result<Digest, Error> {
-            println!("create_digest");
-            let mut queue_guard = QUEUE.lock().unwrap();
-            let starknet_block: mp_starknet::block::Block = queue_guard.pop_front().unwrap();
-            // println!("Synced block {:?}", starknet_block);
-            // println!("Synced block {:?}", starknet_block.header().block_number);
-
-            let block_digest_item: DigestItem = sp_runtime::DigestItem::PreRuntime(mp_digest_log::MADARA_ENGINE_ID, Encode::encode(&starknet_block));
-            Ok(Digest { logs: vec![block_digest_item] })
-        }
-
-		fn append_block_import(
-			&self,
-			_parent: &B::Header,
-			params: &mut BlockImportParams<B, Self::Transaction>,
-			_inherents: &InherentData,
-			_proof: Self::Proof,
-		) -> Result<(), Error> {
-			params.post_digests.push(DigestItem::Other(vec![1]));
-			Ok(())
-		}
-	}
-
     let manual_seal = match sealing {
         Sealing::Manual => future::Either::Left(sc_consensus_manual_seal::run_manual_seal(
             sc_consensus_manual_seal::ManualSealParams {
                 block_import,
                 env: proposer_factory,
-                client: client.clone(),
+                client,
                 pool: transaction_pool,
                 commands_stream,
                 select_chain,
-                consensus_data_provider: Some(Box::new(QueryBlockConsensusDataProvider { _client: client})),
+                consensus_data_provider: None,
                 create_inherent_data_providers,
             },
         )),
@@ -655,7 +631,7 @@ type ChainOpsResult = Result<
     ServiceError,
 >;
 
-pub fn new_chain_ops(mut config: &mut Configuration) -> ChainOpsResult {
+pub fn new_chain_ops(config: &mut Configuration) -> ChainOpsResult {
     config.keystore = sc_service::config::KeystoreConfig::InMemory;
     let sc_service::PartialComponents { client, backend, import_queue, task_manager, other, .. } =
         new_partial::<_>(config, build_aura_grandpa_import_queue)?;
